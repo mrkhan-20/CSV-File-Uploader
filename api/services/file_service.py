@@ -1,67 +1,84 @@
-from fastapi import UploadFile, HTTPException
+"""File handling service"""
+import uuid
 from pathlib import Path
-import pandas as pd
-from io import BytesIO
-from typing import Optional
-from config import settings
+from fastapi import HTTPException, UploadFile
+from config import UPLOAD_DIR, PROCESSED_DIR, ALLOWED_EXTENSIONS
+from validators import (
+    validate_file, 
+    validate_file_size, 
+    validate_csv_content, 
+    validate_excel_content
+)
 
 
 class FileService:
-    """Service for file operations"""
+    """Service for handling file operations"""
     
     @staticmethod
-    def validate_csv_file(file: UploadFile) -> None:
-        """Validate uploaded CSV file"""
-        if not file.filename:
-            raise HTTPException(status_code=400, detail="No file provided")
+    async def save_uploaded_file(file: UploadFile) -> tuple[str, Path]:
+        """
+        Save uploaded file and return file_id and file_path
         
-        file_ext = Path(file.filename).suffix.lower()
-        if file_ext not in settings.ALLOWED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid file format. Only CSV files are allowed."
-            )
-    
-    @staticmethod
-    async def validate_file_size(content: bytes) -> None:
-        """Validate file size"""
-        if len(content) > settings.MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File size exceeds maximum allowed size of {settings.MAX_FILE_SIZE / (1024 * 1024)}MB"
-            )
-    
-    @staticmethod
-    def validate_csv_format(content: bytes) -> None:
-        """Validate CSV format by trying to read it"""
-        try:
-            pd.read_csv(BytesIO(content))
-        except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid CSV format: {str(e)}"
-            )
-    
-    @staticmethod
-    async def save_uploaded_file(file_id: str, content: bytes) -> Path:
-        """Save uploaded file and return file path"""
-        file_path = settings.UPLOAD_DIR / f"{file_id}.csv"
+        Returns:
+            tuple: (file_id, file_path)
+        """
+        # Validate file extension
+        file_ext = validate_file(file)
+        
+        # Generate unique file ID
+        file_id = str(uuid.uuid4())
+        file_path = UPLOAD_DIR / f"{file_id}{file_ext}"
+        
+        # Read and validate file size
+        content = await file.read()
+        validate_file_size(content)
+        
+        # Save file
         with open(file_path, "wb") as f:
             f.write(content)
+        
+        # Validate content
+        if file_ext == '.csv':
+            validate_csv_content(file_path)
+        else:
+            validate_excel_content(file_path)
+        
+        return file_id, file_path
+    
+    @staticmethod
+    def find_file_by_id(file_id: str) -> Path:
+        """
+        Find uploaded file by file_id with any allowed extension
+        
+        Returns:
+            Path: Path to the file
+            
+        Raises:
+            HTTPException: If file not found
+        """
+        for ext in ALLOWED_EXTENSIONS:
+            potential_path = UPLOAD_DIR / f"{file_id}{ext}"
+            if potential_path.exists():
+                return potential_path
+        
+        raise HTTPException(
+            status_code=404,
+            detail="File not found"
+        )
+    
+    @staticmethod
+    def get_processed_file(filename: str) -> Path:
+        """
+        Get processed file by filename
+        
+        Returns:
+            Path: Path to the processed file
+            
+        Raises:
+            HTTPException: If file not found
+        """
+        file_path = PROCESSED_DIR / filename
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
         return file_path
-    
-    @staticmethod
-    def file_exists(file_id: str) -> bool:
-        """Check if file exists"""
-        file_path = settings.UPLOAD_DIR / f"{file_id}.csv"
-        return file_path.exists()
-    
-    @staticmethod
-    def get_file_path(file_id: str) -> Path:
-        """Get file path for a given file_id"""
-        return settings.UPLOAD_DIR / f"{file_id}.csv"
-
-
-# Service instance
-file_service = FileService()
 

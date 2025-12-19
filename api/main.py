@@ -1,15 +1,30 @@
+"""Main FastAPI application"""
 from fastapi import FastAPI
-from config import settings
-from routers import csv
+from routers import upload, operations, tasks, files
 
-
-app = FastAPI(
-    title=settings.API_TITLE,
-    version=settings.API_VERSION
-)
+app = FastAPI(title="CSV Processing API", version="1.0.0")
 
 # Include routers
-app.include_router(csv.router)
+app.include_router(upload.router)
+app.include_router(operations.router)
+app.include_router(tasks.router)
+app.include_router(files.router)
+
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {
+        "message": "CSV Processing API",
+        "version": "1.0.0",
+        "docs": "/docs"
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy"}
 
 
 if __name__ == "__main__":

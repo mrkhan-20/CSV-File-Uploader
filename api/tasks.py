@@ -1,15 +1,15 @@
 from celery import Celery
-import pandas as pd
+import csv
+import openpyxl
 from pathlib import Path
 import uuid
-from typing import Optional, Dict
-from config import settings
+from typing import Optional, Dict, List, Any
 
 # Celery configuration
 celery_app = Celery(
     "csv_processor",
-    broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_BACKEND_URL
+    broker="redis://localhost:6379/0",
+    backend="redis://localhost:6379/0"
 )
 
 celery_app.conf.update(
@@ -23,6 +23,48 @@ celery_app.conf.update(
     task_soft_time_limit=3000,  # 50 minutes
 )
 
+UPLOAD_DIR = Path("uploads")
+PROCESSED_DIR = Path("processed")
+
+
+def read_csv_file(file_path: Path) -> tuple[List[str], List[List[str]]]:
+    """Read CSV file and return headers and data"""
+    with open(file_path, 'r', encoding='utf-8', newline='') as f:
+        reader = csv.reader(f)
+        headers = next(reader)
+        data = list(reader)
+    return headers, data
+
+
+def read_excel_file(file_path: Path) -> tuple[List[str], List[List[str]]]:
+    """Read Excel file and return headers and data"""
+    wb = openpyxl.load_workbook(file_path, read_only=True)
+    ws = wb.active
+    
+    rows = list(ws.iter_rows(values_only=True))
+    headers = [str(cell) if cell is not None else '' for cell in rows[0]]
+    data = [[str(cell) if cell is not None else '' for cell in row] for row in rows[1:]]
+    
+    wb.close()
+    return headers, data
+
+
+def write_csv_file(file_path: Path, headers: List[str], data: List[List[str]]) -> None:
+    """Write data to CSV file"""
+    with open(file_path, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerows(data)
+
+
+def find_input_file(file_id: str) -> Path:
+    """Find input file with any supported extension"""
+    for ext in ['.csv', '.xlsx', '.xls']:
+        file_path = UPLOAD_DIR / f"{file_id}{ext}"
+        if file_path.exists():
+            return file_path
+    raise FileNotFoundError(f"File not found: {file_id}")
+
 
 @celery_app.task(bind=True, name="tasks.process_csv_operation")
 def process_csv_operation(
@@ -33,27 +75,31 @@ def process_csv_operation(
     filter_conditions: Optional[Dict] = None
 ):
     """
-    Process CSV file with specified operation
+    Process CSV/Excel file with specified operation
     """
     try:
         # Update task state
-        self.update_state(state="PROGRESS", meta={"status": "Reading CSV file"})
+        self.update_state(state="PROGRESS", meta={"status": "Reading file"})
         
-        # Read CSV file
-        input_file = settings.UPLOAD_DIR / f"{file_id}.csv"
-        df = pd.read_csv(input_file)
+        # Find and read input file
+        input_file = find_input_file(file_id)
+        
+        if input_file.suffix == '.csv':
+            headers, data = read_csv_file(input_file)
+        else:
+            headers, data = read_excel_file(input_file)
         
         # Perform operation
         self.update_state(state="PROGRESS", meta={"status": f"Performing {operation} operation"})
         
         if operation == "dedup":
-            processed_df = perform_deduplication(df)
+            processed_data = perform_deduplication(headers, data)
         
         elif operation == "unique":
-            processed_df = perform_unique_extraction(df, column)
+            processed_data = perform_unique_extraction(headers, data, column)
         
         elif operation == "filter":
-            processed_df = perform_filtering(df, filter_conditions)
+            processed_data = perform_filtering(headers, data, filter_conditions)
         
         else:
             raise ValueError(f"Unsupported operation: {operation}")
@@ -62,18 +108,18 @@ def process_csv_operation(
         self.update_state(state="PROGRESS", meta={"status": "Saving processed file"})
         
         output_filename = f"{uuid.uuid4()}_{operation}.csv"
-        output_path = settings.PROCESSED_DIR / output_filename
-        processed_df.to_csv(output_path, index=False)
+        output_path = PROCESSED_DIR / output_filename
+        write_csv_file(output_path, headers, processed_data)
         
         return {
             "status": "completed",
             "operation": operation,
             "processed_file": str(output_path),
-            "original_rows": len(df),
-            "processed_rows": len(processed_df)
+            "original_rows": len(data),
+            "processed_rows": len(processed_data)
         }
     
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         raise Exception(f"File not found: {file_id}")
     
     except KeyError as e:
@@ -83,38 +129,47 @@ def process_csv_operation(
         raise Exception(f"Processing failed: {str(e)}")
 
 
-def perform_deduplication(df: pd.DataFrame) -> pd.DataFrame:
+def perform_deduplication(headers: List[str], data: List[List[str]]) -> List[List[str]]:
     """
-    Remove duplicate rows from DataFrame
+    Remove duplicate rows from data
     """
-    # Remove duplicate rows
-    deduplicated_df = df.drop_duplicates()
+    seen = set()
+    unique_data = []
     
-    # Reset index
-    deduplicated_df = deduplicated_df.reset_index(drop=True)
+    for row in data:
+        # Convert row to tuple for hashing
+        row_tuple = tuple(row)
+        if row_tuple not in seen:
+            seen.add(row_tuple)
+            unique_data.append(row)
     
-    return deduplicated_df
+    return unique_data
 
 
-def perform_unique_extraction(df: pd.DataFrame, column: str) -> pd.DataFrame:
+def perform_unique_extraction(headers: List[str], data: List[List[str]], column: str) -> List[List[str]]:
     """
     Extract unique values from a specific column
     """
-    if column not in df.columns:
-        raise KeyError(f"Column '{column}' not found in CSV file")
+    if column not in headers:
+        raise KeyError(f"Column '{column}' not found in file")
     
-    # Get unique rows based on the specified column
-    unique_df = df.drop_duplicates(subset=[column])
+    column_index = headers.index(column)
+    seen = set()
+    unique_data = []
     
-    # Reset index
-    unique_df = unique_df.reset_index(drop=True)
+    for row in data:
+        if column_index < len(row):
+            value = row[column_index]
+            if value not in seen:
+                seen.add(value)
+                unique_data.append(row)
     
-    return unique_df
+    return unique_data
 
 
-def perform_filtering(df: pd.DataFrame, filter_conditions: Dict) -> pd.DataFrame:
+def perform_filtering(headers: List[str], data: List[List[str]], filter_conditions: Dict) -> List[List[str]]:
     """
-    Filter DataFrame based on conditions
+    Filter data based on conditions
     
     Expected filter_conditions format:
     {
@@ -127,51 +182,97 @@ def perform_filtering(df: pd.DataFrame, filter_conditions: Dict) -> pd.DataFrame
     if not filter_conditions:
         raise ValueError("Filter conditions cannot be empty")
     
-    filtered_df = df.copy()
+    # Validate columns
+    for column in filter_conditions.keys():
+        if column not in headers:
+            raise KeyError(f"Column '{column}' not found in file")
     
+    filtered_data = []
+    
+    for row in data:
+        if matches_filters(row, headers, filter_conditions):
+            filtered_data.append(row)
+    
+    return filtered_data
+
+
+def matches_filters(row: List[str], headers: List[str], filter_conditions: Dict) -> bool:
+    """Check if a row matches all filter conditions"""
     for column, condition in filter_conditions.items():
-        if column not in df.columns:
-            raise KeyError(f"Column '{column}' not found in CSV file")
+        column_index = headers.index(column)
         
+        if column_index >= len(row):
+            return False
+        
+        cell_value = row[column_index]
         operator = condition.get("operator", "eq")
-        value = condition.get("value")
+        filter_value = condition.get("value")
         
-        if value is None:
+        if filter_value is None:
             raise ValueError(f"Value is required for filtering column '{column}'")
+        
+        # Try to convert to numeric if possible
+        try:
+            cell_numeric = float(cell_value)
+            filter_numeric = float(filter_value)
+            is_numeric = True
+        except (ValueError, TypeError):
+            is_numeric = False
+            cell_numeric = None
+            filter_numeric = None
         
         # Apply filter based on operator
         if operator == "eq":
-            filtered_df = filtered_df[filtered_df[column] == value]
+            if is_numeric:
+                if not (cell_numeric == filter_numeric):
+                    return False
+            else:
+                if not (cell_value == str(filter_value)):
+                    return False
         
         elif operator == "ne":
-            filtered_df = filtered_df[filtered_df[column] != value]
+            if is_numeric:
+                if not (cell_numeric != filter_numeric):
+                    return False
+            else:
+                if not (cell_value != str(filter_value)):
+                    return False
         
         elif operator == "gt":
-            filtered_df = filtered_df[filtered_df[column] > value]
+            if not is_numeric:
+                raise ValueError(f"Cannot use 'gt' operator on non-numeric column '{column}'")
+            if not (cell_numeric > filter_numeric):
+                return False
         
         elif operator == "lt":
-            filtered_df = filtered_df[filtered_df[column] < value]
+            if not is_numeric:
+                raise ValueError(f"Cannot use 'lt' operator on non-numeric column '{column}'")
+            if not (cell_numeric < filter_numeric):
+                return False
         
         elif operator == "gte":
-            filtered_df = filtered_df[filtered_df[column] >= value]
+            if not is_numeric:
+                raise ValueError(f"Cannot use 'gte' operator on non-numeric column '{column}'")
+            if not (cell_numeric >= filter_numeric):
+                return False
         
         elif operator == "lte":
-            filtered_df = filtered_df[filtered_df[column] <= value]
+            if not is_numeric:
+                raise ValueError(f"Cannot use 'lte' operator on non-numeric column '{column}'")
+            if not (cell_numeric <= filter_numeric):
+                return False
         
         elif operator == "contains":
-            filtered_df = filtered_df[
-                filtered_df[column].astype(str).str.contains(str(value), na=False)
-            ]
+            if str(filter_value).lower() not in cell_value.lower():
+                return False
         
         elif operator == "in":
-            if not isinstance(value, list):
+            if not isinstance(filter_value, list):
                 raise ValueError(f"'in' operator requires a list of values")
-            filtered_df = filtered_df[filtered_df[column].isin(value)]
+            if cell_value not in [str(v) for v in filter_value]:
+                return False
         
         else:
             raise ValueError(f"Unsupported operator: {operator}")
     
-    # Reset index
-    filtered_df = filtered_df.reset_index(drop=True)
-    
-    return filtered_df
+    return True
