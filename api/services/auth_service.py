@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from database import get_db
 
 # JWT Configuration
-SECRET_KEY = "your-secret-key-change-in-production"  # Should be in environment variable
+SECRET_KEY = "test"  # Should be in environment variable
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
