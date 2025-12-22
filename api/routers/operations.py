@@ -1,16 +1,20 @@
 """Operations router"""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from schemas import OperationRequest, OperationResponse
 from services.file_service import FileService
 from validators import validate_operation_request
 from tasks import process_csv_operation
+from dependencies import get_current_user
 
 router = APIRouter(prefix="/api", tags=["operations"])
 
 
 @router.post("/perform-operation/", response_model=OperationResponse)
-async def perform_operation(request: OperationRequest):
+async def perform_operation(
+    request: OperationRequest,
+    current_user: dict = Depends(get_current_user)
+):
     """
     Perform operations on uploaded CSV/Excel file
     """

@@ -1,14 +1,18 @@
 """Upload file router"""
-from fastapi import APIRouter, File, UploadFile, HTTPException
+from fastapi import APIRouter, File, UploadFile, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from services.file_service import FileService
 from schemas import UploadResponse
+from dependencies import get_current_user
 
 router = APIRouter(prefix="/api", tags=["upload"])
 
 
 @router.post("/upload-csv/", response_model=UploadResponse)
-async def upload_csv(file: UploadFile = File(...)):
+async def upload_csv(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
     """
     Upload a CSV or Excel file for processing
     """
